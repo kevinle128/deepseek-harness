@@ -76,6 +76,7 @@ function assertSelection(value: string | undefined, field: string): void {
 class CodexProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, agentOptions: true }
   readonly inheritsParentContext = false
+  readonly agentOptionsRoute = 'native-product' as const
 
   constructor(
     readonly name: string,

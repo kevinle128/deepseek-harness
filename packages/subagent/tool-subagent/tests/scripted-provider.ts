@@ -34,6 +34,8 @@ export interface Config {
   capabilities?: Partial<SubagentCapabilities>
   /** Whether tool descriptions say the child inherits completed turns. */
   inheritsParentContext?: boolean
+  /** Whether Agent options address a native product rather than the Harness LLM. */
+  agentOptionsRoute?: 'native-product'
   /** Provider-owned child route defaults. */
   agentRouteDefaults?: Readonly<{ provider: string; model: string }>
   /** Structured value returned when the request asks for one. */
@@ -46,6 +48,7 @@ export interface Config {
 class ScriptedSubagentProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities
   readonly inheritsParentContext: boolean
+  readonly agentOptionsRoute?: 'native-product'
 
   constructor(
     readonly name: string,
@@ -53,6 +56,7 @@ class ScriptedSubagentProvider implements SubagentProvider {
   ) {
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...config.capabilities }
     this.inheritsParentContext = config.inheritsParentContext ?? false
+    this.agentOptionsRoute = config.agentOptionsRoute
   }
 
   async start(request: SubagentStartRequest): Promise<SubagentRun> {

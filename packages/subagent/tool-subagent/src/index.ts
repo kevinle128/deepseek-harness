@@ -71,7 +71,9 @@ export interface Config {
    */
   backgroundMode?: 'one-shot' | 'continuable'
   /**
-   * Agent options applied to every child; omitted fields use child-loop defaults.
+   * Agent options applied to every child. Harness LLM providers resolve omitted
+   * route values through child-loop defaults; native-product providers consume
+   * their documented subset directly and preserve their own omitted defaults.
    */
   agentOptions?: AgentOptions
   /**
@@ -342,6 +344,12 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
         `tool-subagent: provider "${subagentProvider.name}" does not support child model selection`,
       )
     }
+    if (modelSelectionCapable && subagentProvider.agentOptionsRoute === 'native-product') {
+      throw new Error(
+        `tool-subagent: provider "${subagentProvider.name}" uses native product model options; `
+        + 'configure agentOptions on this tool row instead of enabling modelSelectionSettings',
+      )
+    }
     if (continuable && subagentProvider.prepareContinuable === undefined) {
       throw new Error(
         `tool-subagent: provider "${subagentProvider.name}" does not support \`backgroundMode: continuable\``,
@@ -477,8 +485,9 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
 
           const modelRequest = args as DelegationModelRequest
           const parentOptions = parentAgentOptionsForDelegation(parent)
-          const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
-            || hasConfiguredLlmSelection(config.agentOptions)
+          const requiresRoutePreflight = subagentProvider.agentOptionsRoute !== 'native-product'
+            && (hasDelegationModelRequest(modelRequest)
+              || hasConfiguredLlmSelection(config.agentOptions))
           const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
             ? { ...providerRouteDefaults, ...config.agentOptions }
             : config.agentOptions

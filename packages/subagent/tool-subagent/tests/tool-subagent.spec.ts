@@ -72,6 +72,43 @@ describe('dsh-tool-subagent', () => {
     )).rejects.toThrow('does not support child agentOptions')
   })
 
+  it('passes configured native product options without Harness LLM preflight', async () => {
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup({
+      provider: 'mock',
+      maxDepth: 'provider-managed',
+      agentOptions: {
+        model: 'native-model',
+        reasoningEffort: ReasoningEffortId('high'),
+      },
+    }, {
+      agentOptionsRoute: 'native-product',
+      onStart: (request) => { seen = request },
+    })
+    const resolveCallConfig = vi.spyOn(ctx.llm, 'resolveCallConfig')
+
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+
+    expect(result.isError).toBe(false)
+    expect(resolveCallConfig).not.toHaveBeenCalled()
+    expect(seen?.agentOptions).toEqual({
+      model: 'native-model',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('rejects model-facing selection for native product options at mount', async () => {
+    await expect(setup({
+      provider: 'mock',
+      withModelSelection: true,
+      maxDepth: 'provider-managed',
+    }, {
+      agentOptionsRoute: 'native-product',
+    })).rejects.toThrow(
+      'uses native product model options; configure agentOptions on this tool row',
+    )
+  })
+
   it('registers a `subagent` tool that delegates to the configured provider and returns its output', async () => {
     const ctx = await setup({ provider: 'mock' }, { reply: 'child says hi' })
     const result = await callSubagent(ctx, {

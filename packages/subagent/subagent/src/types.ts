@@ -353,6 +353,12 @@ export interface SubagentProvider {
    */
   readonly inheritsParentContext: boolean
   /**
+   * Route namespace for supported Agent options. `native-product` providers
+   * consume model and effort in their own runtime instead of the Harness LLM.
+   * Omission means Harness LLM routing.
+   */
+  readonly agentOptionsRoute?: 'native-product'
+  /**
    * Optional static provider-owned provider/model route for one-shot Agent
    * options. Consumers merge tool/model overrides over these values before
    * preflight; providers whose route derives from the parent omit it. The value

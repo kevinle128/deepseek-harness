@@ -79,6 +79,7 @@ type ResolvedConfig = Omit<Required<Config>, 'model' | 'reasoningEffort'>
 class ClaudeCodeProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, agentOptions: true }
   readonly inheritsParentContext = false
+  readonly agentOptionsRoute = 'native-product' as const
 
   constructor(
     readonly name: string,
