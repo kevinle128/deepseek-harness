@@ -22,8 +22,8 @@ import {
   type Mock,
   vi,
 } from 'vitest'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type {
@@ -41,6 +41,7 @@ import {
 } from '../src/process.ts'
 import {
   CLAUDE_CODE_PERMISSION_MODES,
+  CLAUDE_CODE_REASONING_EFFORTS,
   DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
   claudeQueryOptions,
   consumeClaudeQuery,
@@ -84,8 +85,14 @@ const fakeParent = {
 function request(
   prompt: ContentBlock[] = [{ type: 'text', text: 'do the task' }],
   signal = new AbortController().signal,
+  agentOptions?: AgentOptions,
 ) {
-  return { prompt, parent: fakeParent, signal }
+  return {
+    prompt,
+    parent: fakeParent,
+    signal,
+    ...agentOptions === undefined ? {} : { agentOptions },
+  }
 }
 
 async function nextTask(): Promise<void> {
@@ -482,6 +489,7 @@ describe('task admission and package contracts', () => {
     const safeFiber = await ctx.plugin(claudeCode, {
       providerName: 'claude-safe',
       model: 'claude-safe-model',
+      reasoningEffort: 'medium',
       env: { DSH_CLAUDE_INSTANCE: 'safe' },
       permissionMode: 'dontAsk',
       disposeGraceMs: 11,
@@ -489,6 +497,7 @@ describe('task admission and package contracts', () => {
     const bypassFiber = await ctx.plugin(claudeCode, {
       providerName: 'claude-bypass',
       model: 'claude-bypass-model',
+      reasoningEffort: 'max',
       env: { DSH_CLAUDE_INSTANCE: 'bypass' },
       permissionMode: 'bypassPermissions',
       disposeGraceMs: 29,
@@ -498,7 +507,11 @@ describe('task admission and package contracts', () => {
 
     const safeController = new AbortController()
     const [safeRun, bypassRun] = await Promise.all([
-      ctx.subagents.start('claude-safe', request(undefined, safeController.signal)),
+      ctx.subagents.start('claude-safe', request(
+        undefined,
+        safeController.signal,
+        { model: 'claude-request-model', reasoningEffort: ReasoningEffortId('high') },
+      )),
       ctx.subagents.start('claude-bypass', request()),
     ])
     await safeFiber.dispose()
@@ -519,10 +532,11 @@ describe('task admission and package contracts', () => {
     expect(queryOptions.map(options => ({
       instance: options.env?.DSH_CLAUDE_INSTANCE,
       model: options.model,
+      effort: options.effort,
       permissionMode: options.permissionMode,
     }))).toEqual([
-      { instance: 'safe', model: 'claude-safe-model', permissionMode: 'dontAsk' },
-      { instance: 'bypass', model: 'claude-bypass-model', permissionMode: 'bypassPermissions' },
+      { instance: 'safe', model: 'claude-request-model', effort: 'high', permissionMode: 'dontAsk' },
+      { instance: 'bypass', model: 'claude-bypass-model', effort: 'max', permissionMode: 'bypassPermissions' },
     ])
     expect(spawnSpecs.map(spec => ({
       instance: spec.env?.DSH_CLAUDE_INSTANCE,
@@ -561,7 +575,7 @@ describe('task admission and package contracts', () => {
     await ctx.fiber.dispose()
   })
 
-  it('accepts an optional non-empty model and the five fixed permission modes', () => {
+  it('accepts optional model and effort defaults plus the fixed permission modes', () => {
     expect(claudeCode.Config({}).providerName).toBe('claude-code')
     expect(claudeCode.Config({}).model).toBeUndefined()
     expect(claudeCode.Config({ providerName: 'claude-safe' }).providerName)
@@ -569,6 +583,12 @@ describe('task admission and package contracts', () => {
     expect(() => claudeCode.Config({ providerName: '' })).toThrow()
     expect(claudeCode.Config({ model: 'claude-opus' }).model).toBe('claude-opus')
     expect(() => claudeCode.Config({ model: '' })).toThrow()
+    expect(claudeCode.Config({}).reasoningEffort).toBeUndefined()
+    for (const reasoningEffort of CLAUDE_CODE_REASONING_EFFORTS) {
+      expect(claudeCode.Config({ reasoningEffort }).reasoningEffort)
+        .toBe(reasoningEffort)
+    }
+    expect(() => claudeCode.Config({ reasoningEffort: 'future' as never })).toThrow()
     expect(claudeCode.Config({}).permissionMode)
       .toBe(DEFAULT_CLAUDE_CODE_PERMISSION_MODE)
     for (const permissionMode of CLAUDE_CODE_PERMISSION_MODES) {
@@ -578,6 +598,27 @@ describe('task admission and package contracts', () => {
     for (const permissionMode of ['default', 'interactive', 'future-mode']) {
       expect(() => claudeCode.Config({ permissionMode } as never)).toThrow()
     }
+  })
+
+  it('rejects unsupported and invalid request options before SDK startup', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(claudeCode, { providerName: 'claude-options' })
+
+    await expect(ctx.subagents.start('claude-options', request(
+      undefined,
+      undefined,
+      { maxTokens: 1 },
+    ))).rejects.toThrow('unsupported agentOptions field maxTokens')
+    await expect(ctx.subagents.start('claude-options', request(
+      undefined,
+      undefined,
+      { reasoningEffort: ReasoningEffortId('future') },
+    ))).rejects.toThrow('unsupported agentOptions.reasoningEffort future')
+    expect(queryMock).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
   })
 
   it('resolves the safe permission default when apply is called directly', async () => {
@@ -852,6 +893,7 @@ describe('query options and result mapping', () => {
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
       model: 'claude-explicit-model',
+      reasoningEffort: 'max',
       permissionMode: 'acceptEdits',
       env: {
         HOST_VISIBLE: 'overridden',
@@ -874,6 +916,7 @@ describe('query options and result mapping', () => {
       abortController: controller,
       cwd: '/workspace',
       model: 'claude-explicit-model',
+      effort: 'max',
       persistSession: false,
       disallowedTools: ['AskUserQuestion'],
       permissionMode: 'acceptEdits',

@@ -19,11 +19,13 @@ import {
 } from '@deepseek-ai/dsh-subagent'
 import {
   CLAUDE_CODE_PERMISSION_MODES,
+  CLAUDE_CODE_REASONING_EFFORTS,
   DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
   DEFAULT_DISPOSE_GRACE_MS,
   claudeCodeStartupFailure,
   startClaudeCodeRun,
   type ClaudeCodePermissionMode,
+  type ClaudeCodeReasoningEffort,
   type ClaudeCodeRunSpec,
 } from './run.ts'
 
@@ -38,8 +40,10 @@ const DEFAULT_PROVIDER_NAME = 'claude-code'
 export interface Config {
   /** Provider name on `ctx.subagents` (default `claude-code`). */
   providerName?: string
-  /** Native Claude model fixed for this instance; omitted to inherit Claude settings. */
+  /** Native model default; per-call `agentOptions.model` takes precedence. */
   model?: string
+  /** Native effort default; per-call `agentOptions.reasoningEffort` takes precedence. */
+  reasoningEffort?: ClaudeCodeReasoningEffort
   /**
    * Explicit environment entries layered over the subprocess seam's
    * credential-scrubbed parent environment.
@@ -59,19 +63,21 @@ export interface Config {
 export const Config: z<Config> = z.object({
   providerName: z.string().min(1).default(DEFAULT_PROVIDER_NAME),
   model: z.string().min(1),
+  reasoningEffort: z.union([...CLAUDE_CODE_REASONING_EFFORTS]),
   env: z.dict(z.string()).default({}),
   permissionMode: z.union([...CLAUDE_CODE_PERMISSION_MODES])
     .default(DEFAULT_CLAUDE_CODE_PERMISSION_MODE),
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
 })
 
-type ResolvedConfig = Omit<Required<Config>, 'model'> & Pick<Config, 'model'>
+type ResolvedConfig = Omit<Required<Config>, 'model' | 'reasoningEffort'>
+  & Pick<Config, 'model' | 'reasoningEffort'>
 /* jscpd:ignore-end */
 
 /* jscpd:ignore-start -- Cordis registration and shared-seam plumbing mirror
  * the Codex sibling; each product's lifecycle remains package-private. */
 class ClaudeCodeProvider implements SubagentProvider {
-  readonly capabilities: SubagentCapabilities = NO_START_CAPABILITIES
+  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, agentOptions: true }
   readonly inheritsParentContext = false
 
   constructor(
@@ -81,6 +87,19 @@ class ClaudeCodeProvider implements SubagentProvider {
   ) {}
 
   async start(request: ResolvedSubagentStartRequest) {
+    const options = request.agentOptions
+    for (const [field, value] of Object.entries(options ?? {})) {
+      if (value !== undefined && field !== 'model' && field !== 'reasoningEffort') {
+        throw new Error(`subagent-claude-code: unsupported agentOptions field ${field}`)
+      }
+    }
+    const model = options?.model ?? this.config.model
+    const requestedEffort = options?.reasoningEffort
+    if (requestedEffort !== undefined && !CLAUDE_CODE_REASONING_EFFORTS.includes(requestedEffort as ClaudeCodeReasoningEffort)) {
+      throw new Error(`subagent-claude-code: unsupported agentOptions.reasoningEffort ${requestedEffort}`)
+    }
+    const reasoningEffort = requestedEffort as ClaudeCodeReasoningEffort | undefined
+      ?? this.config.reasoningEffort
     const parentCwd = request.parent.session.header.cwd
     if (parentCwd === undefined) {
       throw new Error(
@@ -109,7 +128,8 @@ class ClaudeCodeProvider implements SubagentProvider {
     }
     const spec: ClaudeCodeRunSpec = {
       cwd,
-      ...this.config.model === undefined ? {} : { model: this.config.model },
+      ...model === undefined ? {} : { model },
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
       permissionMode: this.config.permissionMode,
       env: this.config.env,
       disposeGraceMs: this.config.disposeGraceMs,
@@ -134,6 +154,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolved: ResolvedConfig = {
     providerName: config.providerName ?? DEFAULT_PROVIDER_NAME,
     ...config.model === undefined ? {} : { model: config.model },
+    ...config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort },
     env: config.env as Record<string, string>,
     permissionMode: config.permissionMode ?? DEFAULT_CLAUDE_CODE_PERMISSION_MODE,
     disposeGraceMs: config.disposeGraceMs as number,
