@@ -7,7 +7,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as yaml from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -76,6 +76,7 @@ const CODEX_PLATFORM_PACKAGES = [
 
 const fakeParent = {
   id: 'parent',
+  options: { provider: 'parent-only', model: 'parent-model', reasoningEffort: ReasoningEffortId('parent-effort') },
   session: { header: { cwd: process.cwd() } },
 } as unknown as Agent
 
@@ -435,6 +436,7 @@ describe('task admission and package contracts', () => {
     expect(provider).toMatchObject({
       name: 'codex',
       capabilities: {
+        agentOptions: true,
         outputSchema: false,
         depthLimit: false,
         toolFilter: false,
@@ -577,9 +579,185 @@ describe('task admission and package contracts', () => {
     await ctx.fiber.dispose()
   })
 
+  it.each([
+    [{}, {}, undefined, undefined],
+    [{}, { model: 'selected' }, 'selected', undefined],
+    [{}, { reasoningEffort: 'high' }, undefined, 'high'],
+    [{ reasoningEffort: 'low' }, {}, undefined, 'low'],
+    [{ model: 'configured', reasoningEffort: 'low' }, {}, 'configured', 'low'],
+    [{ model: 'configured', reasoningEffort: 'low' }, { model: 'selected' }, 'selected', 'low'],
+    [{ model: 'configured', reasoningEffort: 'low' }, { reasoningEffort: 'high' }, 'configured', 'high'],
+    [{}, { model: 'selected', reasoningEffort: 'custom-effort' }, 'selected', 'custom-effort'],
+  ] as const)('resolves per-call selection over provider and native defaults: %j %j', async (
+    config, selected, model, effort,
+  ) => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    const child = fakeChild()
+    vi.spyOn(ctx.subprocess, 'spawn').mockReturnValue(child.handle)
+    await ctx.plugin(codex, config)
+    const agentOptions = {
+      ...'model' in selected ? { model: selected.model } : {},
+      ...'reasoningEffort' in selected
+        ? { reasoningEffort: ReasoningEffortId(selected.reasoningEffort) }
+        : {},
+    }
+    const starting = ctx.subagents.start('codex', { ...request(), agentOptions })
+    try {
+      const initialize = await child.peer.nextMethod('initialize')
+      child.peer.respond(initialize, { userAgent: 'codex-cli 0.153.4' })
+      await child.peer.nextMethod('initialized')
+      const thread = await child.peer.nextMethod('thread/start')
+      expect(thread.params).toEqual({
+        cwd: process.cwd(), ephemeral: true, approvalPolicy: 'never',
+        ...model === undefined ? {} : { model },
+      })
+      child.peer.respond(thread, { thread: { id: 'thread-1', ephemeral: true } })
+      const run = await starting
+      try {
+        const turn = await child.peer.nextMethod('turn/start')
+        expect(turn.params).toEqual({
+          threadId: 'thread-1',
+          input: [{ type: 'text', text: 'do the task', text_elements: [] }],
+          ...effort === undefined ? {} : { effort },
+        })
+        child.peer.send(
+          { id: turn.id, result: { turn: { id: 'turn-1' } } },
+          agentMessage('selected answer', 'final_answer'),
+          turnCompleted('completed'),
+        )
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
+      } finally {
+        await run.dispose()
+      }
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps concurrent overrides local to each run and preserves later defaults', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    const children = [fakeChild(), fakeChild(), fakeChild()]
+    const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+    for (const child of children) spawn.mockReturnValueOnce(child.handle)
+    await ctx.plugin(codex, { model: 'configured', reasoningEffort: 'medium' })
+    const selections = [
+      { model: 'first', reasoningEffort: ReasoningEffortId('low') },
+      { model: 'second', reasoningEffort: ReasoningEffortId('high') },
+      {},
+    ]
+    const runSelected = async (index: number): Promise<void> => {
+      const child = children[index]!
+      const agentOptions = Object.freeze(selections[index]!)
+      const starting = ctx.subagents.start('codex', { ...request(), agentOptions })
+      const initialize = await child.peer.nextMethod('initialize')
+      child.peer.respond(initialize, { userAgent: 'codex-cli 0.153.4' })
+      await child.peer.nextMethod('initialized')
+      const thread = await child.peer.nextMethod('thread/start')
+      expect(thread.params).toMatchObject({ model: agentOptions.model ?? 'configured' })
+      child.peer.respond(thread, { thread: { id: 'thread-1', ephemeral: true } })
+      const run = await starting
+      try {
+        const turn = await child.peer.nextMethod('turn/start')
+        expect(turn.params).toMatchObject({ effort: agentOptions.reasoningEffort ?? 'medium' })
+        child.peer.send(
+          { id: turn.id, result: { turn: { id: 'turn-1' } } },
+          agentMessage(`answer-${index}`, 'final_answer'),
+          turnCompleted('completed'),
+        )
+        await expect(run.result).resolves.toEqual({
+          output: [{ type: 'text', text: `answer-${index}` }], stopReason: 'completed',
+        })
+      } finally {
+        await run.dispose()
+      }
+    }
+    try {
+      await Promise.all([runSelected(0), runSelected(1)])
+      await runSelected(2)
+      expect(spawn).toHaveBeenCalledTimes(3)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects invalid selections and unsupported options before spawning', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+    await ctx.plugin(codex, { model: 'configured', reasoningEffort: 'medium' })
+    try {
+      for (const field of ['model', 'reasoningEffort']) {
+        for (const value of ['', '   ', null, 1, false]) {
+          await expect(ctx.subagents.start('codex', {
+            ...request(), agentOptions: { [field]: value },
+          })).rejects.toThrow(`${field} must be a non-empty string`)
+        }
+      }
+      for (const [field, value] of [
+        ['provider', 'openai'], ['maxTokens', 100], ['permissionMode', 'never'],
+      ]) {
+        await expect(ctx.subagents.start('codex', {
+          ...request(), agentOptions: { [field as string]: value },
+        })).rejects.toThrow(`unsupported agentOptions field ${field}`)
+      }
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('returns a product error when Codex rejects the selected effort without retrying defaults', async () => {
+    const child = fakeChild()
+    const spawn = vi.fn(() => child.handle)
+    const { run, turnStart } = await publishRun(child, undefined, {
+      model: 'selected-model', reasoningEffort: 'unsupported-effort', spawn,
+    })
+    try {
+      expect(turnStart.params).toMatchObject({ effort: 'unsupported-effort' })
+      child.peer.send({
+        id: turnStart.id,
+        error: { code: -32602, message: 'Unsupported effort for this model' },
+      })
+      await expect(run.result).resolves.toMatchObject({
+        stopReason: 'error',
+        diagnostic: expectedFailureDiagnostic('turn-start', 'unknown'),
+      })
+      expect(spawn).toHaveBeenCalledTimes(1)
+    } finally {
+      await run.dispose()
+    }
+  })
+
+  it('rejects blank provider selection defaults at load', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    try {
+      for (const field of ['model', 'reasoningEffort']) {
+        await expect(ctx.plugin(codex, { [field]: '   ' }))
+          .rejects.toThrow(`${field} must be a non-empty string`)
+      }
+      expect(ctx.subagents.list()).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('accepts an optional non-empty model and the three fixed permission modes', () => {
     expect(codex.Config({}).providerName).toBe('codex')
     expect(codex.Config({}).model).toBeUndefined()
+    expect(codex.Config({}).reasoningEffort).toBeUndefined()
+    expect(codex.Config({ reasoningEffort: 'custom-effort' }).reasoningEffort).toBe('custom-effort')
+    expect(() => codex.Config({ reasoningEffort: '' })).toThrow()
     expect(codex.Config({ providerName: 'codex-safe' }).providerName)
       .toBe('codex-safe')
     expect(() => codex.Config({ providerName: '' })).toThrow()

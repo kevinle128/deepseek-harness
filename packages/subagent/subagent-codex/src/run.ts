@@ -140,8 +140,10 @@ export function codexAppServerArgv(): string[] {
 export interface CodexRunSpec {
   /** Parent Session workspace, also supplied to `thread/start`. */
   readonly cwd: string
-  /** Profile-selected native model; omitted to preserve Codex settings. */
+  /** Request model over the provider default; omitted to preserve Codex settings. */
   readonly model?: string
+  /** Request effort over the provider default; omitted to preserve Codex settings. */
+  readonly reasoningEffort?: string
   /** Profile-selected native non-interactive permission mode. */
   readonly permissionMode: CodexPermissionMode
   /** Explicit deployment/test environment layered after the shared scrub. */
@@ -252,6 +254,7 @@ export async function startCodexRun(
     child.stdin as NonNullable<SubprocessHandle['stdin']>,
     spec.permissionMode,
     spec.model,
+    spec.reasoningEffort,
   )
   const onStderr = (chunk: Buffer | string): void => {
     const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk

@@ -225,6 +225,7 @@ export class CodexAppServerWire {
     output: Writable,
     private readonly permissionMode: CodexPermissionMode,
     private readonly model?: string,
+    private readonly reasoningEffort?: string,
   ) {
     this.transport = new JsonRpcLineTransport(input, output)
     // Fatal protocol state can arrive after the current guarded operation has
@@ -320,6 +321,7 @@ export class CodexAppServerWire {
     try {
       const response = object(await this.guarded(this.transport.request('turn/start', {
         threadId,
+        ...this.reasoningEffort === undefined ? {} : { effort: this.reasoningEffort },
         input: texts.map(text => ({ type: 'text', text, text_elements: [] })),
       }, signal), signal), 'turn/start response')
       const turn = object(response.turn, 'turn/start turn')

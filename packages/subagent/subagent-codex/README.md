@@ -44,7 +44,8 @@ Removing the package withdraws the provider and its private runtime closure on t
 | Field | Default | Meaning |
 |---|---|---|
 | `providerName` | `codex` | Non-empty registry name on `ctx.subagents`; each mounted instance needs a unique value |
-| `model` | native Codex settings | Optional non-empty model name fixed for every thread from this provider instance; omission sends no app-server override |
+| `model` | native Codex settings | Native model default; a request can override it; omission preserves Codex settings |
+| `reasoningEffort` | native Codex settings | Native reasoning effort default; a request can override it; omission preserves Codex settings |
 | `env` | `{}` | Explicit child environment layered over the credential-scrubbed parent environment |
 | `permissionMode` | `never` | Native non-interactive approval and sandbox mode fixed for every thread from this provider instance |
 | `disposeGraceMs` | `3000` | Grace between the shared managed-range owner's termination tiers |
@@ -55,7 +56,25 @@ Removing the package withdraws the provider and its private runtime closure on t
 | `approve-for-me` | `approvalPolicy: on-request`, `approvalsReviewer: auto_review`, `sandbox: workspace-write` | Route permission requests through Codex automatic review without a human |
 | `dangerously-bypass-approvals-and-sandbox` | `approvalPolicy: never`, `sandbox: danger-full-access` | Skip approval and sandbox enforcement; this value must be selected explicitly |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-subagent-codex) is the exhaustive source for every accepted field and its JSDoc. A configured `model` passes unchanged on each ephemeral `thread/start`; omission leaves native model selection in force. The provider does not discover models, rewrite aliases, select `modelProvider` or `serviceTier`, or set a fallback. Credential-shaped ambient variables are removed before the explicit `env` overlay, so an API key intended for the child must be supplied there.
+Model and reasoning effort use `request.agentOptions` first, provider configuration second, and native Codex settings last.
+
+The provider advertises `agentOptions` support for `model` and `reasoningEffort` only; defined `provider`, `maxTokens`, and other fields fail before process startup.
+
+Empty, whitespace-only, and non-string selections fail instead of falling back.
+
+Model and effort resolve independently; changing the model does not clear a configured effort.
+
+Parent Harness model settings are not inherited.
+
+The model passes unchanged to `thread/start.model`; reasoning effort passes unchanged to `turn/start.effort`.
+
+An omitted value sends no override, including no `null`.
+
+The pinned app-server accepts non-empty effort strings, so this provider has no fixed effort list; Codex owns model availability and model-specific effort support.
+
+The provider does not discover models, rewrite aliases, select `modelProvider` or `serviceTier`, or set a fallback.
+
+Credential-shaped ambient variables are removed before the explicit `env` overlay, so an API key intended for the child must be supplied there.
 
 ### Exposing the tool
 
@@ -98,7 +117,7 @@ This section explains how the provider drives a real Codex app-server and where 
 ### Design concept
 
 - **One fresh process, thread, and turn per run.** Every run spawns a fresh app-server, creates one ephemeral thread, and executes exactly one turn; there is no continuation, resume, or pooling.
-- **Native configuration is authoritative.** Codex configuration and authentication stay native through the parent cwd, `HOME`, and `CODEX_HOME`; the provider overrides only the optional model and the thread's approval, reviewer, and sandbox fields.
+- **Native configuration is authoritative.** Codex configuration and authentication stay native through the parent cwd, `HOME`, and `CODEX_HOME`; the provider can override model, reasoning effort, and the thread's approval, reviewer, and sandbox fields.
 - **Unattended by design.** Approval, user-input, and MCP requests are answered or declined without a human; unknown server requests fail the run.
 
 ### Source map
@@ -112,7 +131,17 @@ This section explains how the provider drives a real Codex app-server and where 
 
 ### Run flow
 
-A start accepts only a non-empty sequence of text blocks and derives the child cwd from the parent session. It spawns the fixed command through the subprocess seam, performs the `initialize` → `initialized` handshake, maps the Profile-selected mode and optional model into official `thread/start` fields beside `{ cwd, ephemeral: true }`, and publishes the run only after Codex returns a valid ephemeral thread. The published result starts exactly one turn, accepts only notifications for that run's thread and turn, and waits for the authoritative `turn/completed` terminal. The latest `agentMessage` with `phase: "final_answer"` wins; when Codex emits no explicit final phase, the latest message with `phase: null` is the compatibility fallback. A successful turn with no nonblank answer settles as an error. Failed turns use the coarse categories `limit`, `access-policy`, `service`, `transport`, `product-error`, `invalid-result`, or `unknown`; an early app-server exit uses `process`, and applicable connection and stream failures retain a numeric `httpStatusCode`.
+A start accepts only a non-empty sequence of text blocks and derives the child cwd from the parent session.
+
+It spawns the fixed command through the subprocess seam, performs the `initialize` → `initialized` handshake, maps the Profile-selected mode and resolved model into official `thread/start` fields beside `{ cwd, ephemeral: true }`, and publishes the run only after Codex returns a valid ephemeral thread.
+
+The published result starts exactly one turn with the resolved optional effort, accepts only notifications for that run's thread and turn, and waits for the authoritative `turn/completed` terminal.
+
+The latest `agentMessage` with `phase: "final_answer"` wins; when Codex emits no explicit final phase, the latest message with `phase: null` is the compatibility fallback.
+
+A successful turn with no nonblank answer settles as an error.
+
+Failed turns use the coarse categories `limit`, `access-policy`, `service`, `transport`, `product-error`, `invalid-result`, or `unknown`; an early app-server exit uses `process`, and applicable connection and stream failures retain a numeric `httpStatusCode`.
 
 </details>
 
@@ -138,7 +167,15 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-The Codex child receives the standalone text blocks as one turn in a fresh ephemeral thread. Its workspace is the parent Session cwd; the selected Provider instance fixes any configured model, environment, non-interactive approval policy, and sandbox mode, while an omitted model and every other product setting come from native Codex configuration. The executable version comes from the Bundle's pinned platform payload.
+The Codex child receives the standalone text blocks as one turn in a fresh ephemeral thread.
+
+Its workspace is the parent Session cwd.
+
+The request can select a native model and reasoning effort; provider defaults and then native Codex settings supply omitted values.
+
+The Provider instance fixes environment, non-interactive approval policy, and sandbox mode.
+
+The executable version comes from the Bundle's pinned platform payload.
 
 #### Token effect
 
@@ -170,13 +207,19 @@ Append-only: foreground adds one result after the reusable parent prefix, while 
 These limits define when this provider is a poor fit or needs special operational care. They are current package constraints, not a general Codex comparison or a task backlog.
 
 - **One fresh process, thread, and turn per run** — there is no continuation, resume, pooling, progress stream, or product-session persistence.
-- **Static instance selection** — Profile rows fix provider names, optional models, and tool bindings; calls cannot choose or change either a provider or model dynamically, and every exposed tool needs a unique `toolName`.
+- **Tool integration** — per-call native selection is supported through `ctx.subagents.start()` and `request.agentOptions`.
+
+  The shared delegation tool still validates selection against Harness LLM routes; it needs native-option support before it can expose Codex model and effort selection.
+
+  Each exposed tool still needs a unique `toolName`.
 - **Authentication and account state remain native** — the Bundle supplies the CLI but does not create an account, log in, trust a project, or rewrite Codex settings; configuration and authentication failures surface with their lifecycle stage and the safe `unknown` fallback rather than a separate public taxonomy.
 - **The native platform payload is required at delegation time** — installs that omit optional dependencies, unsupported platforms, and missing or damaged payloads fail at the first run; there is no host-CLI fallback.
 - **Compatibility is pinned by development evidence** — upgrading from the verified 0.153.4 protocol baseline requires regenerating upstream schema evidence and rerunning handshake, answer-selection, approval, cancellation, keyless real-product, and credentialed DeepSeek nonce tests.
 - **No human approval path** — known unattended approval requests are denied and unknown server requests fail closed; the three Profile modes never create a DSH interaction channel or per-call allow policy.
 - **Assistant payload is final text only** — a failed run may additionally expose the separate safe diagnostic; reasoning, commentary, intermediate messages, tool traffic, usage, raw stderr, and workspace diffs remain outside the parent Session, while generic Job ids, notices, and status come from the shared job runtime.
-- **No optional shared capabilities** — `agentOptions`, output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
+- **Limited shared capabilities** — output schemas, child personas, tool filtering, and harness depth enforcement remain unsupported.
+
+  `agentOptions` accepts only native model and reasoning effort.
 - **No wall-clock timeout or side-effect rollback** — the caller cancels long work, and files or external systems changed before cancellation are not restored.
 
 <a id="dev-note"></a>
