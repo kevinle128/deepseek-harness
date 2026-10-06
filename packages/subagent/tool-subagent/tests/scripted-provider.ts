@@ -56,7 +56,7 @@ class ScriptedSubagentProvider implements SubagentProvider {
   ) {
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...config.capabilities }
     this.inheritsParentContext = config.inheritsParentContext ?? false
-    this.agentOptionsRoute = config.agentOptionsRoute
+    if (config.agentOptionsRoute !== undefined) this.agentOptionsRoute = config.agentOptionsRoute
   }
 
   async start(request: SubagentStartRequest): Promise<SubagentRun> {
