@@ -15,6 +15,7 @@ import { promisify } from 'node:util'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type {
@@ -137,6 +138,7 @@ async function realRuntime(): Promise<RealRuntime> {
 async function realHarness(
   script: ResponsesScript,
   permissionMode?: CodexPermissionMode,
+  selection: Pick<codex.Config, 'model' | 'reasoningEffort'> = {},
 ): Promise<{
   readonly harness: RealHarness
   readonly fixture: ResponsesFixture
@@ -145,6 +147,7 @@ async function realHarness(
   const { ctx, handles, spawnSpecs } = await realRuntime()
   await ctx.plugin(codex, {
     env: instance.env,
+    ...selection,
     ...permissionMode === undefined ? {} : { permissionMode },
     disposeGraceMs: 2_000,
   })
@@ -235,12 +238,20 @@ describe('real @openai/codex 0.153.4 product', () => {
     )) as {
       definitions: {
         ThreadStartParams: JsonSchemaNode
+        TurnStartParams: JsonSchemaNode
+        ReasoningEffort: JsonSchemaNode
       }
     }
     expect(schema.definitions.ThreadStartParams.properties?.model).toEqual({
       type: ['string', 'null'],
     })
     expect(schema.definitions.ThreadStartParams.required).toBeUndefined()
+    expect(schema.definitions.ThreadStartParams.properties).not.toHaveProperty('reasoningEffort')
+    expect(schema.definitions.TurnStartParams.properties?.effort).toMatchObject({
+      anyOf: [{ $ref: '#/definitions/ReasoningEffort' }, { type: 'null' }],
+    })
+    expect(schema.definitions.ReasoningEffort).toMatchObject({ type: 'string', minLength: 1 })
+    expect(schema.definitions.ReasoningEffort).not.toHaveProperty('enum')
 
     const run = await harness.ctx.subagents.start('codex', {
       prompt: [{ type: 'text', text: task }],
@@ -267,6 +278,37 @@ describe('real @openai/codex 0.153.4 product', () => {
     expect(recorded.headers.authorization).toBe('Bearer dsh-fake-openai-key')
     expect(recorded.body.model).toBe('fixture-model')
     expect(responseInputTexts(recorded.body)).toContain(task)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('sends per-call model and effort through the pinned product over provider defaults', async () => {
+    const { harness, fixture } = await realHarness([
+      { kind: 'complete', text: 'REQUEST_SELECTION' },
+      { kind: 'complete', text: 'CONFIG_SELECTION' },
+    ], undefined, {
+      model: 'gpt-5.3-codex',
+      reasoningEffort: 'low',
+    })
+    for (const agentOptions of [
+      { model: 'gpt-5.4', reasoningEffort: ReasoningEffortId('high') },
+      {},
+    ]) {
+      const run = await harness.ctx.subagents.start('codex', {
+        parent: harness.parent, prompt: [{ type: 'text', text: 'Return the fixture answer.' }],
+        signal: new AbortController().signal, agentOptions,
+      })
+      try {
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
+      } finally {
+        await run.dispose()
+      }
+    }
+    expect(fixture.requests.map(({ body }) => ({
+      model: body.model, effort: (body.reasoning as Record<string, unknown>)?.effort,
+    }))).toEqual([
+      { model: 'gpt-5.4', effort: 'high' },
+      { model: 'gpt-5.3-codex', effort: 'low' },
+    ])
     await expectQuiescent(harness.handles)
   }, 60_000)
 
