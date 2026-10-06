@@ -52,6 +52,18 @@ export const CLAUDE_CODE_PERMISSION_MODES = [
 /** Profile-selectable non-interactive Claude Code permission mode. */
 export type ClaudeCodePermissionMode = typeof CLAUDE_CODE_PERMISSION_MODES[number]
 
+/** Native Claude reasoning-effort values supported by the pinned Agent SDK. */
+export const CLAUDE_CODE_REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const satisfies readonly NonNullable<Options['effort']>[]
+
+/** Profile-selectable native Claude reasoning effort. */
+export type ClaudeCodeReasoningEffort = typeof CLAUDE_CODE_REASONING_EFFORTS[number]
+
 /** Safe default for unattended Claude Code runs. */
 export const DEFAULT_CLAUDE_CODE_PERMISSION_MODE: ClaudeCodePermissionMode = 'dontAsk'
 
@@ -150,8 +162,10 @@ function unattendedDiagnostic(
 export interface ClaudeCodeRunSpec {
   /** Parent Session workspace supplied to the SDK and real CLI. */
   readonly cwd: string
-  /** Profile-selected native model; omitted to preserve Claude settings. */
+  /** Request model over the provider default; omitted to preserve Claude settings. */
   readonly model?: string
+  /** Request effort over the provider default; omitted to preserve Claude settings. */
+  readonly reasoningEffort?: ClaudeCodeReasoningEffort
   /** Profile-selected native non-interactive permission mode. */
   readonly permissionMode: ClaudeCodePermissionMode
   /** Explicit deployment/test environment layered after shared scrubbing. */
@@ -326,6 +340,7 @@ export function claudeQueryOptions(
     abortController: controller,
     cwd: spec.cwd,
     ...spec.model === undefined ? {} : { model: spec.model },
+    ...spec.reasoningEffort === undefined ? {} : { effort: spec.reasoningEffort },
     env: { ...scrubbedParentEnv(), ...spec.env },
     persistSession: false,
     disallowedTools: spec.permissionMode === 'plan'
